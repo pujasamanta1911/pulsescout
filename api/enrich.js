@@ -58,18 +58,53 @@ const PROVIDERS = {
 
   apollo: {
     keyEnv: "APOLLO_API_KEY",
-    // Apollo People Match — stronger India coverage. Fill in fields you need.
+    // ENRICH one person via People Match. Costs 1 credit. Returns email + profile.
+    // Note: base path is /api/v1 (not /v1). LinkedIn URLs are normalized first
+    // because Apollo's matcher is fragile about http/https/www/trailing slash.
     enrich: async (key, { profileUrl, email, name }) => {
-      const r = await fetch("https://api.apollo.io/v1/people/match", {
+      const body = {};
+      if (profileUrl) body.linkedin_url = normalizeLinkedInUrl(profileUrl);
+      if (email) body.email = email;
+      if (name) body.name = name;
+      if (!body.linkedin_url && !body.email && !body.name)
+        throw badRequest("Provide profileUrl, email, or name");
+      const r = await fetch(
+        "https://api.apollo.io/api/v1/people/match?reveal_personal_emails=false",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", "X-Api-Key": key },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!r.ok) throw upstream(r.status, await safeText(r));
+      const json = await r.json();
+      if (!json.person) throw badRequest("No match found for that input");
+      return normalizeApollo(json.person, profileUrl);
+    },
+    // DISCOVER many people via mixed_people search. This endpoint is CREDIT-FREE,
+    // so it works for India and USA without burning credits. It returns light
+    // records (no revealed email) — enrich the chosen ones afterward.
+    // params accepts: { domains: [...], country: "US"|"IN", minFollowers, page }
+    discover: async (key, { params = {} }) => {
+      const { domains = [], country, page = 1, perPage = 25 } = params;
+      const payload = {
+        page,
+        per_page: Math.min(perPage, 100),
+        person_titles: domains.length ? domains : undefined,        // domain ≈ title/keyword
+        q_keywords: domains.length ? domains.join(" ") : undefined,  // broaden the match
+        person_locations: country
+          ? [country === "IN" ? "India" : country === "US" ? "United States" : country]
+          : undefined,
+      };
+      const r = await fetch("https://api.apollo.io/api/v1/mixed_people/api_search", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Api-Key": key },
-        body: JSON.stringify({ linkedin_url: profileUrl, email, name }),
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", "X-Api-Key": key },
+        body: JSON.stringify(payload),
       });
       if (!r.ok) throw upstream(r.status, await safeText(r));
-      return normalizeApollo((await r.json()).person, profileUrl);
-    },
-    discover: async () => {
-      throw badRequest("Apollo discover not implemented — use /v1/mixed_people/search");
+      const json = await r.json();
+      const people = json.people || json.contacts || [];
+      return people.map((p) => normalizeApollo(p, p.linkedin_url));
     },
   },
 };
@@ -92,18 +127,51 @@ function normalizeProxycurl(d = {}, url) {
 }
 
 function normalizeApollo(p = {}, url) {
+  const org = p.organization || p.account || {};
+  const loc = p.country || p.state || p.city || "";
   return {
     id: url || p.id || cryptoId(),
     name: p.name || `${p.first_name || ""} ${p.last_name || ""}`.trim(),
     headline: p.headline || p.title || "",
-    followers: p.linkedin_num_followers || 0,
-    country: (p.country || "").toUpperCase(),
-    domains: p.industry ? [p.industry] : [],
-    pulsePostsLast90: 0,
-    avgEngagement: 0,
-    profileUrl: url || p.linkedin_url,
+    email: p.email || (p.contact && p.contact.email) || "", // for outreach
+    followers: p.linkedin_num_followers || p.num_followers || 0,
+    country: countryToCode(loc),
+    domains: deriveApolloDomains(p, org),
+    pulsePostsLast90: null, // UNVERIFIED — Apollo doesn't track post activity
+    avgEngagement: null,    // UNVERIFIED — fill manually if needed
+    company: org.name || "",
+    profileUrl: url || p.linkedin_url || "",
     avatarColor: pickColor(p.name || url || ""),
   };
+}
+
+function deriveApolloDomains(p, org) {
+  const out = new Set();
+  if (p.industry) out.add(p.industry);
+  if (org.industry) out.add(org.industry);
+  (p.functions || []).forEach((f) => out.add(f));
+  return [...out].filter(Boolean);
+}
+
+function countryToCode(loc) {
+  const s = String(loc).toLowerCase();
+  if (s.includes("india")) return "IN";
+  if (s.includes("united states") || s === "us" || s.includes("usa")) return "US";
+  return String(loc).toUpperCase();
+}
+
+// Apollo's matcher is fragile: strip protocol/www, lowercase host, drop trailing
+// slash and query, so the same person doesn't miss or create a duplicate record.
+function normalizeLinkedInUrl(raw) {
+  try {
+    let u = String(raw).trim();
+    if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+    const parsed = new URL(u);
+    let path = parsed.pathname.replace(/\/+$/, "");
+    return `https://www.linkedin.com${path}`;
+  } catch {
+    return raw;
+  }
 }
 
 /* ---- helpers ---- */
