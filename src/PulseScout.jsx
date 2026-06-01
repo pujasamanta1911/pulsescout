@@ -80,7 +80,20 @@ async function proxyEnrich(provider, profileUrl) {
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || `Proxy ${res.status}`);
-  return json.data; // already normalized by the backend
+  return json.data;
+}
+
+// Credit-free discovery: search Apollo for people matching country + domains.
+// Used when the user runs Live search with no URLs to enrich.
+async function proxyDiscover(provider, params) {
+  const res = await fetch(PROXY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, action: "discover", params }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `Proxy ${res.status}`);
+  return json.data || [];
 }
 
 /* =============================================================================
@@ -153,11 +166,20 @@ export default function PulseScout() {
         leads = DEMO;
       } else {
         const urls = urlInput.split(/\s+/).filter(Boolean);
-        if (!urls.length) throw new Error("Add at least one profile URL to enrich.");
-        leads = await Promise.all(
-          urls.map((u) => proxyEnrich(provider, u).catch(() => null))
-        );
-        leads = leads.filter(Boolean);
+        if (urls.length) {
+          // ENRICH path: user pasted profile URLs → look each up (costs 1 credit each)
+          leads = await Promise.all(
+            urls.map((u) => proxyEnrich(provider, u).catch(() => null))
+          );
+          leads = leads.filter(Boolean);
+        } else {
+          // DISCOVER path: no URLs → search the provider by country + domains.
+          // Apollo's search endpoint is credit-free.
+          leads = await proxyDiscover(provider, {
+            country,
+            domains: selectedDomains,
+          });
+        }
       }
       const scored = leads
         .map((l) => ({ ...l, score: qualifyScore(l) }))
