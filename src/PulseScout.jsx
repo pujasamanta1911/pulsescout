@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from "react";
-import { Search, Users, FileText, TrendingUp, Globe, Download, Filter, Star, Loader2, AlertTriangle, Settings, X, ExternalLink } from "lucide-react";
+import { Search, Users, FileText, TrendingUp, Globe, Download, Filter, Star, Loader2, AlertTriangle, Settings, X, ExternalLink, Mail } from "lucide-react";
 
 /* =============================================================================
    PulseScout — LinkedIn Pulse Influencer Lead Finder
@@ -142,7 +142,7 @@ const DEMO = makeDemoData();
 export default function PulseScout() {
   const [country, setCountry] = useState("US");
   const [selectedDomains, setSelectedDomains] = useState([]);
-  const [minFollowers, setMinFollowers] = useState(5000);
+  const [minFollowers, setMinFollowers] = useState(0);
   const [minPulse, setMinPulse] = useState(2);
   const [minScore, setMinScore] = useState(0);
   const [results, setResults] = useState([]);
@@ -152,6 +152,37 @@ export default function PulseScout() {
   const [provider, setProvider] = useState("proxycurl");
   const [dataMode, setDataMode] = useState("demo");
   const [urlInput, setUrlInput] = useState("");
+  const [enrichingId, setEnrichingId] = useState(null);
+
+  // Enrich a single lead by its LinkedIn URL (costs 1 Apollo credit).
+  // Used by the "Reveal email" button on each lead card.
+  const enrichLead = useCallback(async (lead) => {
+    if (!lead.profileUrl) {
+      alert(
+        "No LinkedIn URL on this lead — Apollo's free search doesn't include it. " +
+        "Find the person's LinkedIn URL manually, paste it into the URL box above, and run a fresh search."
+      );
+      return;
+    }
+    if (!window.confirm(`Reveal full data for ${lead.name}? This spends 1 Apollo credit.`)) return;
+    setEnrichingId(lead.id);
+    try {
+      const full = await proxyEnrich(provider, lead.profileUrl);
+      // Merge enriched fields back into the existing lead, recompute score.
+      setResults((prev) =>
+        prev.map((r) => {
+          if (r.id !== lead.id) return r;
+          const merged = { ...r, ...full };
+          merged.score = qualifyScore(merged);
+          return merged;
+        })
+      );
+    } catch (e) {
+      alert("Enrich failed: " + e.message);
+    } finally {
+      setEnrichingId(null);
+    }
+  }, [provider]);
 
   const toggleDomain = (d) =>
     setSelectedDomains((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
@@ -272,7 +303,7 @@ export default function PulseScout() {
           </div>
 
           <label style={S.label}>Min followers: <b>{minFollowers.toLocaleString()}</b></label>
-          <input type="range" min={4000} max={50000} step={500}
+          <input type="range" min={0} max={50000} step={500}
             value={minFollowers} onChange={(e) => setMinFollowers(+e.target.value)} style={S.range} />
 
           <label style={S.label}>Min Pulse posts (90d): <b>{minPulse}</b></label>
@@ -315,7 +346,13 @@ export default function PulseScout() {
 
           <div style={S.cardGrid}>
             {results.map((r, i) => (
-              <LeadCard key={r.id} lead={r} index={i} />
+              <LeadCard
+                key={r.id}
+                lead={r}
+                index={i}
+                onEnrich={dataMode === "live" ? () => enrichLead(r) : null}
+                isEnriching={enrichingId === r.id}
+              />
             ))}
           </div>
         </main>
@@ -347,14 +384,14 @@ function scoreColor(s) {
   return "#8a8a8a";
 }
 
-function LeadCard({ lead, index }) {
-  const initials = lead.name.split(" ").map((w) => w[0]).slice(0, 2).join("");
+function LeadCard({ lead, index, onEnrich, isEnriching }) {
+  const initials = (lead.name || "?").split(" ").map((w) => w[0]).slice(0, 2).join("");
   return (
     <div style={{ ...S.card, animationDelay: `${Math.min(index, 12) * 40}ms` }}>
       <div style={S.cardTop}>
         <div style={{ ...S.avatar, background: lead.avatarColor }}>{initials}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={S.cardName}>{lead.name}</div>
+          <div style={S.cardName}>{lead.name}{lead.company ? ` · ${lead.company}` : ""}</div>
           <div style={S.cardHeadline}>{lead.headline}</div>
         </div>
         <div style={{ ...S.scoreBadge, color: scoreColor(lead.score), borderColor: scoreColor(lead.score) }}>
@@ -362,16 +399,37 @@ function LeadCard({ lead, index }) {
         </div>
       </div>
       <div style={S.metrics}>
-        <Metric icon={<Users size={13} />} v={lead.followers.toLocaleString()} l="followers" />
+        <Metric icon={<Users size={13} />} v={lead.followers ? lead.followers.toLocaleString() : "—"} l="followers" />
         <Metric icon={<FileText size={13} />} v={lead.pulsePostsLast90 ?? "—"} l="posts/90d" />
         <Metric icon={<TrendingUp size={13} />} v={lead.avgEngagement != null ? lead.avgEngagement.toLocaleString() : "—"} l="avg eng." />
       </div>
+      {lead.email && (
+        <div style={S.emailRow} title={lead.email}>
+          <Mail size={13} /> <span style={S.emailText}>{lead.email}</span>
+        </div>
+      )}
       <div style={S.tagRow}>
         {lead.domains.map((d) => <span key={d} style={S.tag}>{d}</span>)}
       </div>
-      <a href={lead.profileUrl} target="_blank" rel="noreferrer" style={S.profileLink}>
-        View profile <ExternalLink size={13} />
-      </a>
+      <div style={S.cardActions}>
+        {lead.profileUrl ? (
+          <a href={lead.profileUrl} target="_blank" rel="noreferrer" style={S.profileLink}>
+            View <ExternalLink size={13} />
+          </a>
+        ) : (
+          <span style={{ ...S.profileLink, opacity: 0.4, cursor: "default" }}>No URL</span>
+        )}
+        {onEnrich && !lead.email && (
+          <button
+            style={{ ...S.enrichBtn, opacity: isEnriching ? 0.6 : 1 }}
+            onClick={onEnrich}
+            disabled={isEnriching}
+          >
+            {isEnriching ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Mail size={13} />}
+            {isEnriching ? "Revealing…" : "Reveal email (1 credit)"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -474,7 +532,11 @@ const S = {
   metricLabel: { fontSize: 10, color: "#999", marginTop: 2 },
   tagRow: { display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 },
   tag: { fontSize: 10.5, background: "#eaf2fb", color: ACCENT, padding: "3px 8px", borderRadius: 6, fontWeight: 600 },
-  profileLink: { display: "flex", gap: 5, alignItems: "center", justifyContent: "center", fontSize: 13, color: ACCENT, textDecoration: "none", fontWeight: 600, padding: "8px", border: "1px solid #e3e0d8", borderRadius: 8 },
+  profileLink: { flex: 1, display: "flex", gap: 5, alignItems: "center", justifyContent: "center", fontSize: 13, color: ACCENT, textDecoration: "none", fontWeight: 600, padding: "8px", border: "1px solid #e3e0d8", borderRadius: 8 },
+  cardActions: { display: "flex", gap: 8 },
+  enrichBtn: { flex: 1, display: "flex", gap: 5, alignItems: "center", justifyContent: "center", fontSize: 12, color: "#fff", background: "#1d8a6e", border: "none", borderRadius: 8, padding: "8px", fontWeight: 600, cursor: "pointer" },
+  emailRow: { display: "flex", gap: 6, alignItems: "center", background: "#eaf8f1", color: "#0a5d44", padding: "6px 10px", borderRadius: 7, fontSize: 12, marginBottom: 10, fontWeight: 600 },
+  emailText: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   empty: { textAlign: "center", padding: "70px 20px", display: "flex", flexDirection: "column", alignItems: "center" },
   emptyMark: { width: 60, height: 60, borderRadius: 16, background: ACCENT, color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 30, fontFamily: "Georgia, serif" },
   noResults: { background: "#fff", border: "1px dashed #d0ccc2", borderRadius: 12, padding: 40, textAlign: "center", color: "#888" },
