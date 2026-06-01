@@ -161,8 +161,11 @@ export default function PulseScout() {
       }
       const scored = leads
         .map((l) => ({ ...l, score: qualifyScore(l) }))
-        .filter((l) => l.country === country)
-        .filter((l) => l.followers >= minFollowers)
+        // Country: keep leads with no country set (Apollo discover doesn't supply it).
+        // Only filter out leads whose country is set AND doesn't match.
+        .filter((l) => !l.country || l.country === country)
+        // Followers: keep leads with no follower count (Apollo discover doesn't supply it).
+        .filter((l) => !l.followers || l.followers >= minFollowers)
         .filter((l) => l.pulsePostsLast90 == null || l.pulsePostsLast90 >= minPulse)
         .filter((l) => l.score >= minScore)
         .filter((l) => selectedDomains.length === 0 || l.domains.some((d) => selectedDomains.includes(d)))
